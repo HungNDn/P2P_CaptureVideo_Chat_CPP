@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC WebSocket Signaling</title>
+    <style>
+        #receivedMessages {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            max-width: 400px;
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC WebSocket Signaling</h1>
+    <input type="text" id="messageInput" placeholder="Enter message to send">
+    <button onclick="sendMessage()">Send</button>
+    <h2>Received Messages:</h2>
+    <div id="receivedMessages"></div>
+
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:8081/ws');
+let peerConnection;
+let dataChannel;
+const videoElement = document.getElementById("remoteVideo");
+
+socket.onopen = () => {
+    console.log('WebSocket connection established.');
+    createPeerConnection();
+};
+
+socket.onmessage = (event) => {
+    let message = event.data;
+    console.log('Received WebSocket message:', message);
+
+    try {
+        const parsedMessage = JSON.parse(message);
+        console.log('Parsed signaling message:', parsedMessage);
+
+        switch (parsedMessage.type) {
+            case 'offer':
+                handleOffer(parsedMessage.data);
+                break;
+            case 'answer':
+                handleAnswer(parsedMessage.data);
+                break;
+            case 'candidate':
+                handleIceCandidate(parsedMessage.data);
+                break;
+            case 'message':
+                displayReceivedMessage(parsedMessage.data);
+                break;
+            default:
+                console.error('Unknown message type:', parsedMessage.type);
+                break;
+        }
+    } catch (e) {
+        console.error('Error parsing WebSocket message:', e);
+    }
+};
+
+socket.onerror = (error) => {
+    console.error('WebSocket error:', error);
+};
+
+socket.onclose = () => {
+    console.log('WebSocket connection closed.');
+};
+
+function sendMessage() {
+    const message = document.getElementById('messageInput').value;
+    const messageData = { type: 'message', data: message };
+
+    if (dataChannel && dataChannel.readyState === 'open') {
+        dataChannel.send(message);
+        console.log('Sent message via DataChannel:', message);
+    } else {
+        console.error('DataChannel is not open yet!');
+    }
+
+    socket.send(JSON.stringify(messageData));
+}
+
+function createPeerConnection() {
+    console.log("Creating PeerConnection...");
+    const configuration = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+        ]
+    };
+
+    peerConnection = new RTCPeerConnection(configuration);
+
+    peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+            sendIceCandidate(event.candidate);
+        }
+    };
+
+    peerConnection.ondatachannel = (event) => {
+        const receivedDataChannel = event.channel;
+
+        receivedDataChannel.onmessage = (event) => {
+            console.log('Received message via DataChannel:', event.data);
+            if (event.data instanceof ArrayBuffer) {
+                const textMessage = new TextDecoder().decode(event.data);
+                displayReceivedMessage(textMessage);
+            } else {
+                displayReceivedMessage(event.data);
+            }
+        };
+
+        receivedDataChannel.onopen = () => {
+            console.log('Received DataChannel is open. Ready to send messages.');
+            dataChannel = receivedDataChannel;
+        };
+
+        receivedDataChannel.onerror = (error) => {
+            console.error('DataChannel error:', error);
+        };
+    };
+
+    navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+    .then((stream) => {
+        stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+        console.log("Local stream added to peer connection.");
+    })
+    .catch((error) => {
+        console.error("Failed to get user media:", error);
+    });
+
+    // Handle the video stream received from the C++ client
+    peerConnection.ontrack = (event) => {
+        console.log("peerConnection.ontrack");
+        videoElement.srcObject = event.streams[0];
+        videoElement.autoplay = true;
+        document.body.appendChild(videoElement);
+    };
+
+    dataChannel = peerConnection.createDataChannel('chat');
+    console.log("DataChannel created:", dataChannel);
+
+    dataChannel.onopen = () => {
+        console.log('DataChannel is open. Ready to send messages.');
+    };
+
+    dataChannel.onerror = (error) => {
+        console.error('DataChannel error:', error);
+    };
+}
+
+function displayReceivedMessage(message) {
+    const div = document.createElement('div');
+    div.textContent = message;
+    document.getElementById('receivedMessages').appendChild(div);
+}
+
+function handleOffer(offerSdp) {
+    console.log('Received Offer SDP:', offerSdp);
+
+    const offer = new RTCSessionDescription({ type: 'offer', sdp: offerSdp });
+    if (peerConnection.signalingState === "stable") {
+        peerConnection.setRemoteDescription(offer)
+            .then(() => peerConnection.createAnswer())
+            .then((answer) => peerConnection.setLocalDescription(answer))
+            .then(() => sendAnswer(peerConnection.localDescription.sdp))
+            .catch((error) => {
+                console.error('Error handling offer:', error);
+                alert('Failed to handle offer: ' + error.message);
+            });
+    }
+}
+
+function handleAnswer(answerSdp) {
+    console.log('Received Answer SDP:', answerSdp);
+
+    const answer = new RTCSessionDescription({ type: 'answer', sdp: answerSdp });
+    peerConnection.setRemoteDescription(answer)
+        .then(() => {
+            console.log('Answer processed successfully');
+        })
+        .catch((error) => {
+            console.error('Error handling answer:', error);
+            alert('Failed to handle answer: ' + error.message);
+        });
+}
+
+function handleIceCandidate(candidate) {
+    peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+        .catch((error) => console.error('Error adding ICE candidate:', error));
+}
+
+function sendIceCandidate(candidate) {
+    const candidateMessage = {
+        type: 'candidate',
+        candidate: candidate
+    };
+    socket.send(JSON.stringify(candidateMessage));
+    console.log('Sent ICE candidate:', candidate);
+}
+
+function sendAnswer(answerSdp) {
+    const answerMessage = {
+        type: 'answer',
+        sdp: answerSdp
+    };
+    socket.send(JSON.stringify(answerMessage));
+    console.log('Sent SDP answer:', answerSdp);
+}
+
+    </script>
+    
+</body>
+</html>
